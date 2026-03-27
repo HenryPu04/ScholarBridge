@@ -30,6 +30,23 @@ class Paper(Base):
     )
 
 
+class Synthesis(Base):
+    __tablename__ = "syntheses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Canonical cache key: paper_ids sorted alphabetically, deduplicated, pipe-joined.
+    # e.g. "ARXIV:2301.001|ARXIV:2308.003" — unique constraint is the idempotency anchor.
+    paper_ids_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+    paper_ids: Mapped[str] = mapped_column(Text, nullable=False)              # JSON array
+    consensus_findings: Mapped[str] = mapped_column(Text, nullable=False)     # JSON array
+    conflicting_evidence: Mapped[str] = mapped_column(Text, nullable=False)   # JSON array
+    combined_recommendation: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_strength: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+
 class Summary(Base):
     __tablename__ = "summaries"
 
