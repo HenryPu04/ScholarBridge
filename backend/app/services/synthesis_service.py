@@ -32,7 +32,8 @@ from app.services.indexing_pipeline import _get_genai_client
 
 logger = logging.getLogger(__name__)
 
-PRO_MODEL = "gemini-2.5-pro"   # SDK auto-prepends "models/" — do NOT include prefix
+#PRO_MODEL = "gemini-2.5-pro"
+PRO_MODEL = "gemini-2.5-flash"   # SDK auto-prepends "models/" 
 CACHE_TTL = timedelta(hours=1)
 
 _SYSTEM_PROMPT = """\
