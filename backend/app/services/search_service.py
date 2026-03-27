@@ -25,7 +25,7 @@ from app.services.semantic_scholar import SemanticScholarService, get_semantic_s
 logger = logging.getLogger(__name__)
 
 EMBED_MODEL = "gemini-embedding-001"   # must match indexing_pipeline.py
-FLASH_MODEL = "gemini-1.5-flash"
+FLASH_MODEL = "gemini-2.5-flash"
 SIMILARITY_THRESHOLD = 0.5   # minimum Pinecone score; below this → treat as 0 results
 
 

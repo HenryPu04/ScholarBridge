@@ -12,6 +12,10 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Create DB tables (idempotent — safe to run on every startup).
+    from app.db.init_db import create_tables
+    await create_tables()
+
     # Initialize Pinecone index on startup (creates it if it doesn't exist).
     # Skipped in mock mode so no credentials are required during local dev.
     if not settings.use_mock_api:

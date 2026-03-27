@@ -375,6 +375,25 @@ async def run_pipeline(paper_id: str) -> None:
             source,
         )
 
+        # ==================================================================
+        # Stage 6 — SUMMARIZING
+        # ==================================================================
+        _set_status(paper_id, PipelineStatus.SUMMARIZING)
+
+        from app.services.summarization_service import get_summarization_service
+        from app.db.engine import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            await get_summarization_service().summarize(
+                paper=paper,
+                source=source,
+                db=db,
+                requested_paper_id=paper_id,  # preserve user-supplied ID (e.g. "ARXIV:...")
+            )
+
+        _set_status(paper_id, PipelineStatus.COMPLETE)
+        logger.info("Paper %s summarization complete.", paper_id)
+
     except Exception as exc:
         _set_status(paper_id, PipelineStatus.FAILED, str(exc))
         logger.exception(
