@@ -1,22 +1,26 @@
 """
-Semantic Search Service — Phase 2.1
-=====================================
+Semantic Search Service
+========================
 Orchestrates the full search pipeline:
 
 1. Query Expansion   — Gemini Flash generates 3 academic phrases from the user query
 2. Embed             — gemini-embedding-001 (768 dims) embeds the expanded query
-3. Pinecone query    — top-K vector matches with optional metadata filters
-4. Deduplicate       — best chunk per paper_id
-5. Hybrid re-rank    — FinalScore = sim×0.7 + norm_citations×0.3
-6. Fallback          — if Pinecone returns 0 matches, fall back to Semantic Scholar
+3. Parallel Search   — Pinecone vector search and Semantic Scholar keyword search run
+                       concurrently via asyncio; neither blocks the other
+4. Threshold filter  — Pinecone results below SIMILARITY_THRESHOLD are discarded
+5. Deduplicate       — best chunk per paper_id within Pinecone results
+6. Hybrid re-rank    — FinalScore = sim×0.8 + norm_citations×0.2 (Pinecone results only)
+7. Merge             — Pinecone results (sorted by relevance) + SS-only results;
+                       papers present in both get Pinecone relevance + SS metadata enrichment
 """
 
+import asyncio
 import logging
 
 from google.genai import types as genai_types
 
 from app.config import get_settings
-from app.models.paper import Author, OpenAccessPdf, PaperResult
+from app.models.paper import Author, PaperResult
 from app.models.search import SearchResult
 from app.services.indexing_pipeline import EMBED_DIMENSIONS, _get_genai_client
 from app.services.pinecone_client import get_pinecone_client
@@ -26,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 EMBED_MODEL = "gemini-embedding-001"   # must match indexing_pipeline.py
 FLASH_MODEL = "gemini-2.5-flash"
-SIMILARITY_THRESHOLD = 0.5   # minimum Pinecone score; below this → treat as 0 results
+SIMILARITY_THRESHOLD = 0.55   # minimum score to include a Pinecone result
+PROMOTION_THRESHOLD = 0.72    # above this → promoted to top of merged list
 
 
 class SearchService:
@@ -72,11 +77,21 @@ class SearchService:
                 )
                 query_embedding = response.embeddings[0].values
             except Exception as exc:
-                logger.warning("Query embedding failed (%s) — using Semantic Scholar fallback.", exc)
+                logger.warning("Query embedding failed (%s) — Pinecone search skipped.", exc)
 
         # ------------------------------------------------------------------
-        # Step 3 — Pinecone query (skip if embedding failed or mock mode)
+        # Step 3 — Parallel search: kick off SS immediately, then run Pinecone
         # ------------------------------------------------------------------
+        ss_task = asyncio.create_task(
+            self._ss.search_papers(
+                query=query,          # original query, not expanded
+                limit=limit,
+                year_min=year_min,
+                year_max=year_max,
+                open_access_only=open_access_only,
+            )
+        )
+
         pinecone_results: list[SearchResult] = []
         if query_embedding is not None:
             pinecone_results = self._query_pinecone(
@@ -87,32 +102,20 @@ class SearchService:
                 fields_of_study=fields_of_study or [],
             )
 
-        if pinecone_results:
-            return pinecone_results
+        try:
+            ss_papers = await ss_task
+        except Exception as exc:
+            logger.warning("Semantic Scholar search failed (%s) — using Pinecone results only.", exc)
+            ss_papers = []
 
         # ------------------------------------------------------------------
-        # Step 5 (Fallback) — Semantic Scholar keyword search
+        # Step 4 — Merge and return
         # ------------------------------------------------------------------
-        logger.info(
-            "Pinecone returned 0 results for query=%r — falling back to Semantic Scholar.",
-            query,
-        )
-        ss_papers = await self._ss.search_papers(
-            query=query,
+        return self._merge(
+            pinecone_results=pinecone_results,
+            ss_papers=ss_papers,
             limit=limit,
-            year_min=year_min,
-            year_max=year_max,
-            open_access_only=open_access_only,
         )
-        return [
-            SearchResult(
-                **paper.model_dump(),
-                relevance_score=0.0,
-                matched_chunk_text=None,
-                search_source="semantic_scholar_fallback",
-            )
-            for paper in ss_papers
-        ]
 
     # ------------------------------------------------------------------
     # Step 1 helper — Query Expansion via Gemini Flash
@@ -148,7 +151,7 @@ class SearchService:
         return query
 
     # ------------------------------------------------------------------
-    # Steps 3–4 helper — Pinecone query + deduplicate + hybrid re-rank
+    # Pinecone query + threshold filter + deduplicate + hybrid re-rank
     # ------------------------------------------------------------------
 
     def _query_pinecone(
@@ -193,11 +196,14 @@ class SearchService:
 
         deduped = list(best.values())
 
-        # If the best raw similarity score is below threshold, signal fallback
-        if not deduped or max(m["score"] for m in deduped) < SIMILARITY_THRESHOLD:
+        # Discard results where even the best match is below threshold.
+        # This prevents low-quality OCR chunks from surfacing for off-topic queries.
+        deduped = [m for m in deduped if m["score"] >= SIMILARITY_THRESHOLD]
+
+        if not deduped:
             logger.info(
-                "Best Pinecone score below threshold (%.4f < %.1f) — treating as 0 results.",
-                max((m["score"] for m in deduped), default=0.0),
+                "All Pinecone scores below inclusion threshold (%.2f) — "
+                "SS results will fill the response.",
                 SIMILARITY_THRESHOLD,
             )
             return []
@@ -215,9 +221,91 @@ class SearchService:
             m["final_score"] = round(sim * 0.8 + cit * 0.2, 4)
 
         deduped.sort(key=lambda m: m["final_score"], reverse=True)
-        top = deduped[:limit]
 
-        return [self._match_to_search_result(m) for m in top]
+        return [self._match_to_search_result(m) for m in deduped[:limit]]
+
+    # ------------------------------------------------------------------
+    # Merge Pinecone + SS results
+    # ------------------------------------------------------------------
+
+    def _merge(
+        self,
+        pinecone_results: list[SearchResult],
+        ss_papers: list[PaperResult],
+        limit: int,
+    ) -> list[SearchResult]:
+        """
+        Three-tier merge:
+
+        - Promoted  (relevance_score > PROMOTION_THRESHOLD): always first — these are
+                    high-confidence library matches.
+        - Mid-tier  (SIMILARITY_THRESHOLD–PROMOTION_THRESHOLD): interleaved with
+                    SS-only results by score; a highly-cited SS paper can outrank a
+                    marginal Pinecone match.
+        - SS-only   (not in Pinecone): scored by citation count (capped at 0.50) so
+                    they rank cleanly against mid-tier Pinecone results.
+
+        search_source:
+          "pinecone"         — paper is indexed in your library
+          "semantic_scholar" — found on the web, not yet indexed
+        """
+        ss_by_id: dict[str, PaperResult] = {p.paper_id: p for p in ss_papers}
+        pinecone_ids: set[str] = {r.paper_id for r in pinecone_results}
+
+        # Shared citation ceiling for consistent score normalisation across both sources
+        max_cit = max(
+            [r.citation_count or 0 for r in pinecone_results]
+            + [p.citation_count or 0 for p in ss_papers]
+            + [1],
+        )
+
+        # Enrich and split Pinecone results into promoted / mid-tier
+        promoted: list[SearchResult] = []
+        mid_tier: list[SearchResult] = []
+
+        for pr in pinecone_results:
+            ss_match = ss_by_id.get(pr.paper_id)
+            if ss_match:
+                pr = pr.model_copy(update={
+                    "abstract": pr.abstract or ss_match.abstract,
+                    "open_access_pdf": pr.open_access_pdf or ss_match.open_access_pdf,
+                    "venue": pr.venue or ss_match.venue,
+                    "citation_count": pr.citation_count or ss_match.citation_count,
+                })
+            if pr.relevance_score > PROMOTION_THRESHOLD:
+                promoted.append(pr)
+            else:
+                mid_tier.append(pr)
+
+        # SS-only results: citation-based score (max 0.50 — no similarity component)
+        ss_only: list[SearchResult] = []
+        for paper in ss_papers:
+            if paper.paper_id not in pinecone_ids:
+                cit_score = round((paper.citation_count or 0) / max_cit * 0.5, 4)
+                ss_only.append(
+                    SearchResult(
+                        **paper.model_dump(),
+                        relevance_score=cit_score,
+                        matched_chunk_text=None,
+                        search_source="semantic_scholar",
+                    )
+                )
+
+        # Interleave mid-tier Pinecone + SS-only by relevance_score
+        mixed = sorted(mid_tier + ss_only, key=lambda r: r.relevance_score, reverse=True)
+
+        merged = promoted + mixed
+
+        logger.info(
+            "Search merge: %d promoted + %d mid-tier pinecone + %d ss-only = %d total (limit=%d)",
+            len(promoted),
+            len(mid_tier),
+            len(ss_only),
+            len(merged),
+            limit,
+        )
+
+        return merged[:limit]
 
     def _match_to_search_result(self, match: dict) -> SearchResult:
         meta = match.get("metadata", {})
@@ -226,11 +314,10 @@ class SearchService:
         authors_str: str = meta.get("authors", "")
         authors = [Author(name=n.strip()) for n in authors_str.split(",") if n.strip()]
 
-        # open_access_pdf is not stored in Pinecone metadata — leave as None
         return SearchResult(
             paper_id=meta.get("paper_id", match["id"]),
             title=meta.get("title", "Unknown Title"),
-            abstract=None,   # not stored in Pinecone — caller can fetch via /papers/{id}
+            abstract=None,   # not stored in Pinecone — enriched from SS in _merge if available
             authors=authors,
             year=meta.get("year"),
             citation_count=meta.get("citation_count"),

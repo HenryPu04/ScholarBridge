@@ -9,7 +9,7 @@ class Author(BaseModel):
 
 class OpenAccessPdf(BaseModel):
     url: str
-    status: str  # e.g. "GREEN", "BRONZE", "GOLD"
+    status: str  
 
 
 class PaperResult(BaseModel):
