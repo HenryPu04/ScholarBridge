@@ -209,11 +209,12 @@ class SearchService:
             return []
 
         # Hybrid re-rank: FinalScore = sim×0.8 + norm_citations×0.2
+        # max_cit floor of 1 prevents ZeroDivisionError when all papers have
+        # zero or None citation_count (e.g. preprints, single-result sets).
         max_cit = max(
-            (m["metadata"].get("citation_count") or 0 for m in deduped),
-            default=1,
+            max(m["metadata"].get("citation_count") or 0 for m in deduped),
+            1,  # floor — guarantees max_cit >= 1 in all cases
         )
-        max_cit = max(max_cit, 1)  # prevent divide-by-zero
 
         for m in deduped:
             sim = float(m["score"])
@@ -252,11 +253,13 @@ class SearchService:
         ss_by_id: dict[str, PaperResult] = {p.paper_id: p for p in ss_papers}
         pinecone_ids: set[str] = {r.paper_id for r in pinecone_results}
 
-        # Shared citation ceiling for consistent score normalisation across both sources
+        # Shared citation ceiling for consistent score normalisation across both
+        # sources.  The explicit 1 in the list is the floor that prevents
+        # ZeroDivisionError when both lists are empty or all counts are zero/None.
         max_cit = max(
             [r.citation_count or 0 for r in pinecone_results]
             + [p.citation_count or 0 for p in ss_papers]
-            + [1],
+            + [1],  # floor — guarantees max_cit >= 1 in all cases
         )
 
         # Enrich and split Pinecone results into promoted / mid-tier

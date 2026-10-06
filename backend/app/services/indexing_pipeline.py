@@ -90,6 +90,27 @@ def _build_fallback_text(paper: PaperDetail) -> str:
     return " ".join(parts).strip()
 
 
+def _chunk_text(text: str) -> list[str]:
+    """
+    Split *text* into overlapping fixed-size character chunks.
+
+    Each slice is stripped of surrounding whitespace before being added;
+    slices that reduce to an empty string are skipped.  Returns an empty
+    list when *text* is empty or consists entirely of whitespace.
+
+    Extracted as a module-level helper so it can be unit-tested and
+    monkey-patched independently of the full pipeline.
+    """
+    chunks: list[str] = []
+    for start in range(0, len(text), STEP):
+        chunk = text[start : start + CHUNK_SIZE].strip()
+        if chunk:
+            chunks.append(chunk)
+        if len(chunks) >= MAX_CHUNKS:
+            break
+    return chunks
+
+
 # Module-level singletons — initialised once, reused across all pipeline runs.
 _genai_client: genai.Client | None = None
 _resolved_embed_model: str | None = None
@@ -290,13 +311,7 @@ async def run_pipeline(paper_id: str) -> None:
         # ==================================================================
         _set_status(paper_id, PipelineStatus.CHUNKING)
 
-        chunks: list[str] = []
-        for start in range(0, len(text), STEP):
-            chunk = text[start : start + CHUNK_SIZE].strip()
-            if chunk:
-                chunks.append(chunk)
-            if len(chunks) >= MAX_CHUNKS:
-                break
+        chunks = _chunk_text(text)
 
         logger.info(
             "Paper %s: produced %d chunks from %d chars of text.",
@@ -304,6 +319,22 @@ async def run_pipeline(paper_id: str) -> None:
             len(chunks),
             len(text),
         )
+
+        if not chunks:
+            _set_status(
+                paper_id,
+                PipelineStatus.FAILED,
+                f"No indexable content after chunking {len(text)} chars of text — "
+                "text may be whitespace-only or entirely non-extractable. "
+                "Cannot index paper.",
+            )
+            logger.error(
+                "Paper %s: _chunk_text returned [] for %d chars of text — "
+                "pipeline cannot continue.",
+                paper_id,
+                len(text),
+            )
+            return
 
         # ==================================================================
         # Stage 4 — EMBEDDING
