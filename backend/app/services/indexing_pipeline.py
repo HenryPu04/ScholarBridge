@@ -132,11 +132,14 @@ def _get_genai_client() -> genai.Client:
 
 def _embed_single(text: str) -> list[float]:
     """
-    Embed one chunk using the new google-genai SDK.
+    Embed one chunk using the new google-genai SDK (synchronous).
 
     Probes EMBED_MODEL_PRIMARY on first call; falls back to EMBED_MODEL_FALLBACK
     on any 404 / model-not-found response and remembers the working model so
     subsequent calls skip the probe entirely.
+
+    This function is intentionally synchronous so it can be safely handed to
+    asyncio.to_thread() in the embedding loop.  Do not add async I/O here.
     """
     global _resolved_embed_model
 
@@ -356,8 +359,12 @@ async def run_pipeline(paper_id: str) -> None:
             for i in range(0, len(chunks), EMBED_BATCH_SIZE):
                 batch = chunks[i : i + EMBED_BATCH_SIZE]
 
+                # Offload each blocking Gemini HTTP call to the thread pool so
+                # it does not freeze the event loop during the round-trip.
                 for chunk_text in batch:
-                    all_embeddings.append(_embed_single(chunk_text))
+                    all_embeddings.append(
+                        await asyncio.to_thread(_embed_single, chunk_text)
+                    )
 
                 # Rate-limit pause between batches (not after the last one)
                 if i + EMBED_BATCH_SIZE < len(chunks):

@@ -5,8 +5,9 @@ Orchestrates the full search pipeline:
 
 1. Query Expansion   — Gemini Flash generates 3 academic phrases from the user query
 2. Embed             — gemini-embedding-001 (768 dims) embeds the expanded query
-3. Parallel Search   — Pinecone vector search and Semantic Scholar keyword search run
-                       concurrently via asyncio; neither blocks the other
+3. Parallel Search   — Pinecone vector search (offloaded to a thread via asyncio.to_thread
+                       so the sync SDK does not block the event loop) and Semantic Scholar
+                       keyword search run concurrently; neither blocks the other
 4. Threshold filter  — Pinecone results below SIMILARITY_THRESHOLD are discarded
 5. Deduplicate       — best chunk per paper_id within Pinecone results
 6. Hybrid re-rank    — FinalScore = sim×0.8 + norm_citations×0.2 (Pinecone results only)
@@ -94,12 +95,16 @@ class SearchService:
 
         pinecone_results: list[SearchResult] = []
         if query_embedding is not None:
-            pinecone_results = self._query_pinecone(
-                query_embedding=query_embedding,
-                limit=limit,
-                year_min=year_min,
-                year_max=year_max,
-                fields_of_study=fields_of_study or [],
+            # _query_pinecone calls the synchronous Pinecone SDK; offload it to
+            # a thread pool so it does not block the async event loop while the
+            # SS task runs concurrently.
+            pinecone_results = await asyncio.to_thread(
+                self._query_pinecone,
+                query_embedding,
+                limit,
+                year_min,
+                year_max,
+                fields_of_study or [],
             )
 
         try:
