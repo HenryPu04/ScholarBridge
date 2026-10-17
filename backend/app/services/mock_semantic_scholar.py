@@ -10,6 +10,7 @@ Fixture coverage
 - "cover crops"  → 3 results; paper_1 has an open-access PDF
 - "soil health"  → 3 results; paper_4 has an open-access PDF
 - "regenerative" → 1 result;  abstract-only (no PDF) — tests fallback path
+- "empty paper"  → 1 result;  no abstract, no TLDR, no PDF — tests empty-extraction path
 - Any other query → empty list (tests zero-results UI state)
 
 Paper IDs for direct detail lookups
@@ -21,6 +22,7 @@ Paper IDs for direct detail lookups
   MOCK_SOIL_002   abstract only
   MOCK_SOIL_003   abstract only
   MOCK_REGEN_001  abstract only
+  MOCK_EMPTY_001  no abstract, no TLDR, no PDF — triggers zero-text extraction path
 
 PDF URL note
 ------------
@@ -217,6 +219,23 @@ _FIXTURES: dict[str, PaperDetail] = {
         influential_citation_count=14,
     ),
     # ------------------------------------------------------------------
+    # Empty extraction test case — no abstract, no TLDR, no PDF
+    # ------------------------------------------------------------------
+    "MOCK_EMPTY_001": PaperDetail(
+        paper_id="MOCK_EMPTY_001",
+        title="Unextractable Paper Test Case",
+        abstract=None,          # triggers 0 text from abstract
+        authors=[Author(author_id="MOCK_A008", name="Test Author")],
+        year=2024,
+        citation_count=0,
+        fields_of_study=["Computer Science"],
+        open_access_pdf=None,   # no PDF to download
+        venue=None,
+        tldr=None,              # triggers 0 text from TLDR
+        reference_count=0,
+        influential_citation_count=0,
+    ),
+    # ------------------------------------------------------------------
     # Regenerative agriculture cluster (abstract-only — tests fallback)
     # ------------------------------------------------------------------
     "MOCK_REGEN_001": PaperDetail(
@@ -259,6 +278,8 @@ _SEARCH_INDEX: dict[str, list[str]] = {
     "regenerative":   ["MOCK_REGEN_001"],
     "adoption":       ["MOCK_COVER_003"],
     "smallholder":    ["MOCK_COVER_001", "MOCK_SOIL_001", "MOCK_SOIL_003"],
+    "empty paper":    ["MOCK_EMPTY_001"],
+    "unextractable":  ["MOCK_EMPTY_001"],
 }
 
 
