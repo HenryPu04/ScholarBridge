@@ -1,9 +1,13 @@
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.engine import get_db
+from app.models.graph import CitationGraphResponse
 from app.models.paper import PaperDetail, PaperResult
 from app.models.search import SearchResult
+from app.services.graph_service import build_citation_graph
 from app.services.search_service import SearchService, get_search_service
 from app.services.semantic_scholar import (
     SemanticScholarError,
@@ -46,6 +50,32 @@ async def get_paper(
     """Get full paper details by Semantic Scholar paper ID."""
     try:
         return await service.get_paper_details(paper_id)
+    except SemanticScholarError as exc:
+        status = 404 if "404" in str(exc) else 502
+        raise HTTPException(status_code=status, detail=str(exc))
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Paper not found")
+        raise HTTPException(status_code=502, detail="Upstream API error")
+
+
+@router.get("/{paper_id}/graph", response_model=CitationGraphResponse)
+async def get_paper_citation_graph(
+    paper_id: str,
+    depth: int = Query(default=1, ge=1, le=2, description="BFS depth (1 or 2 hops)"),
+    max_nodes: int = Query(default=10, ge=3, le=25, description="Maximum nodes in response"),
+    db: AsyncSession = Depends(get_db),
+    service: SemanticScholarService = Depends(get_semantic_scholar_service),
+) -> CitationGraphResponse:
+    """Return a citation graph rooted at the given Semantic Scholar paper ID."""
+    try:
+        return await build_citation_graph(
+            root_id=paper_id,
+            db=db,
+            ss_service=service,
+            depth=depth,
+            max_nodes=max_nodes,
+        )
     except SemanticScholarError as exc:
         status = 404 if "404" in str(exc) else 502
         raise HTTPException(status_code=status, detail=str(exc))
