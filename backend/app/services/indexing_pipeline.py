@@ -175,7 +175,11 @@ async def run_pipeline(paper_id: str) -> None:
         # ------------------------------------------------------------------
         # Fetch paper metadata from Semantic Scholar
         # ------------------------------------------------------------------
-        ss = get_semantic_scholar_service()
+        if use_mock:
+            from app.services.mock_semantic_scholar import get_mock_semantic_scholar_service
+            ss = get_mock_semantic_scholar_service()
+        else:
+            ss = get_semantic_scholar_service()
         paper: PaperDetail = await ss.get_paper_details(paper_id)
 
         # Track whether we are working from the PDF or just text fallback
